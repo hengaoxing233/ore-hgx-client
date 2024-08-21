@@ -1,0 +1,17 @@
+[package]
+name = "ore-hgx-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.5.13", features = ["derive"] }
+core_affinity = "0.8.1"
+drillx_2 = "1.0.0"
+futures-util = "0.3.30"
+tokio = { version = "1.39.2", features = ["full"] }
+tokio-tungstenite = { version = "0.23.1", features = ["native-tls"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+url = "2.5.2"
+serde_json = "1.0.122"
+num_cpus = "1.16.0"
