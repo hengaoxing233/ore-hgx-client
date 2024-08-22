@@ -1,11 +1,15 @@
 use std::{ops::Range, sync::Arc, time::{Duration, Instant}};
-use std::sync::Mutex;
+use rayon::prelude::*;
 use clap::{arg, Parser};
-use drillx_2::equix;
+use drillx::{DrillxError, equix, Hash, seed};
 use futures_util::SinkExt;
 use base64::prelude::*;
 use serde_json::Value;
 use core_affinity;
+use drillx::equix::SolutionArray;
+use tracing::{error, info};
+use sha3::Digest;
+use crate::log::init_log;
 
 #[derive(Debug)]
 pub enum ServerMessage {
@@ -29,6 +33,7 @@ fn create_shared_client() -> Arc<reqwest::blocking::Client> {
             .http1_title_case_headers()
             .danger_accept_invalid_certs(true)
             .connection_verbose(true)
+            .timeout(Duration::from_secs(1))
             .build()
             .unwrap(),
     )
@@ -40,7 +45,9 @@ fn array_to_base64(data: &[u8; 32]) -> String {
 
 fn base64_to_array(base64_string: &str) -> Result<[u8; 32], &'static str> {
     let decoded_bytes = base64::decode(base64_string).map_err(|_| "Invalid Base64 input")?;
-
+    if decoded_bytes.len() != 32 {
+        return Err("Decoded byte length is not 32");
+    }
     let array: [u8; 32] = decoded_bytes.as_slice().try_into().map_err(|_| "Decoded byte length is not 32")?;
 
     Ok(array)
@@ -69,9 +76,10 @@ fn base64_to_u8_8(encoded: &str) -> Result<[u8; 8], base64::DecodeError> {
 }
 
 pub async fn mine(args: MineArgs, url: String) {
+    init_log();
     let client = create_shared_client();
     let server_url = url.clone();
-    println!("服务端url:{}", server_url);
+    info!("服务端url:{}", server_url);
     let cores = args.cores.unwrap_or_else(|| num_cpus::get());
 
     let mut challenge_str = String::new();
@@ -79,9 +87,8 @@ pub async fn mine(args: MineArgs, url: String) {
     let mut min_difficulty = 0;
     let mut nonce_start = 0;
     let mut nonce_end = 0;
-
     loop {
-        println!("获取任务---------------------------------------------");
+        info!("----------------------获取任务-----------------------");
         let res = client.get(format!("{server_url}/getchallenge"))
             .header("Content-Type", "application/json")
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0")
@@ -89,7 +96,7 @@ pub async fn mine(args: MineArgs, url: String) {
         match res {
             Ok(response) => match response.text() {
                 Ok(text) => {
-                    println!("获取任务响应内容: {}", text);
+                    info!("获取任务响应内容: {}", text);
                     if let Ok(json) = serde_json::from_str::<Value>(&text) {
                         if let Some(ok) = json["code"].as_u64() {
                             if ok == 1 {
@@ -99,7 +106,7 @@ pub async fn mine(args: MineArgs, url: String) {
                                 nonce_start = json["nonce_start"].as_u64().unwrap_or_default();
                                 nonce_end = json["nonce_end"].as_u64().unwrap_or_default();
                             } else {
-                                println!("获取任务失败");
+                                error!("获取任务失败");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
@@ -107,22 +114,19 @@ pub async fn mine(args: MineArgs, url: String) {
                     }
                 },
                 Err(e) => {
-                    println!("获取任务失败: {:?}", e);
+                    error!("获取任务失败: {:?}", e);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             },
             Err(e) => {
-                println!("获取任务失败: {:?}", e);
+                error!("获取任务失败: {:?}", e);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         }
 
-        println!("已接收到挖矿消息!");
-        println!("开始挖矿...");
-        println!("Nonce range: {} - {}", nonce_start, nonce_end);
-        println!("challenge: {}", challenge_str);
+        info!("开始挖矿...Nonce range: {} - {}，challenge: {}", nonce_start, nonce_end, challenge_str);
         let mut challenge = [0;32];
         match base64_to_array(&challenge_str) {
             Ok(ret) => challenge = ret,
@@ -153,7 +157,7 @@ pub async fn mine(args: MineArgs, url: String) {
 
                 let mut best_nonce = start_nonce;
                 let mut best_difficulty = 0;
-                let mut best_hash = drillx_2::Hash::default();
+                let mut best_hash = drillx::Hash::default();
                 let mut total_hashes: u64 = 0;
 
                 let hash_timer = Instant::now(); // 计时器开始
@@ -162,7 +166,7 @@ pub async fn mine(args: MineArgs, url: String) {
                 // 挖矿循环，直到达到nonce范围或超时
                 while nonce < end_nonce && hash_timer.elapsed().as_secs() < 10 {
                     // Create hash
-                    for hx in  drillx_2::get_hashes_with_memory(&mut memory, &challenge, &nonce.to_le_bytes()) {
+                    for hx in  get_hashes_with_memory(&mut memory, &challenge, &nonce.to_le_bytes()) {
                         total_hashes += 1;
                         let difficulty = hx.difficulty();
                         if difficulty.gt(&best_difficulty) {
@@ -182,7 +186,7 @@ pub async fn mine(args: MineArgs, url: String) {
 
         let mut best_nonce: u64 = 0;
         let mut best_difficulty = 0;
-        let mut best_hash = drillx_2::Hash::default();
+        let mut best_hash = drillx::Hash::default();
         let mut total_nonces_checked = 0;
         for h in handles {
             if let Ok(Some((nonce, difficulty, hash, nonces_checked))) = h.join() {
@@ -196,15 +200,15 @@ pub async fn mine(args: MineArgs, url: String) {
         }
 
         let hash_time = hash_timer.elapsed();
-        println!("找到最佳diff: {}", best_difficulty);
-        println!("Processed: {}", total_nonces_checked);
-        println!("Hash time: {:?}", hash_time);
+        info!("找到最佳难度: {}", best_difficulty);
+        info!("Processed: {}", total_nonces_checked);
+        info!("Hash time: {:?}", hash_time);
 
         if best_difficulty < min_difficulty {
-            println!("难度太低，丢弃，重新计算");
+            info!("难度太低，丢弃，重新计算");
             continue;
         }
-
+        info!("----------------------提交任务-----------------------");
         let res = client.post(format!("{server_url}/setsolution"))
             .header("Accept", "application/json, text/plain, */*")
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0")
@@ -221,22 +225,70 @@ pub async fn mine(args: MineArgs, url: String) {
         match res {
             Ok(response) => match response.text() {
                 Ok(text) => {
-                    println!("提交哈希响应内容: {}", text);
+                    info!("提交哈希响应内容: {}", text);
                     if let Ok(json) = serde_json::from_str::<Value>(&text) {
                         if let Some(ok) = json["code"].as_u64() {
                             if ok == 1 {
-                                println!("提交哈希成功");
+                                info!("提交哈希成功");
                             } else {
-                                println!("提交哈希失败");
+                                error!("提交哈希失败");
                             }
                         }
                     }
                 },
                 Err(e) => {
-                    println!("提交哈希失败: {:?}", e);
+                    error!("提交哈希失败: {:?}", e);
                 }
             },
-            Err(e) => println!("提交哈希失败: {:?}", e),
+            Err(e) => error!("提交哈希失败: {:?}", e),
+        }
+
+    }
+}
+#[inline(always)]
+fn sorted(mut digest: [u8; 16]) -> [u8; 16] {
+    unsafe {
+        let u16_slice: &mut [u16; 8] = core::mem::transmute(&mut digest);
+        u16_slice.sort_unstable();
+        digest
+    }
+}
+#[cfg(not(feature = "solana"))]
+#[inline(always)]
+fn hashv(digest: &[u8; 16], nonce: &[u8; 8]) -> [u8; 32] {
+    let mut hasher = sha3::Keccak256::new();
+    hasher.update(&sorted(*digest));
+    hasher.update(nonce);
+    hasher.finalize().into()
+}
+pub fn get_hashes_with_memory(
+    memory: &mut equix::SolverMemory,
+    challenge: &[u8; 32],
+    nonce: &[u8; 8],
+) -> Vec<Hash> {
+    let mut hashes: Vec<Hash> = Vec::with_capacity(7);
+    if let Ok(solutions) = get_digests_with_memory(memory, challenge, nonce) {
+        for solution in solutions {
+            let digest = solution.to_bytes();
+            hashes.push(Hash {
+                d: digest,
+                h: hashv(&digest, nonce),
+            });
         }
     }
+
+    hashes
+}
+#[inline(always)]
+fn get_digests_with_memory(
+    memory: &mut equix::SolverMemory,
+    challenge: &[u8; 32],
+    nonce: &[u8; 8],
+) -> Result<SolutionArray, DrillxError> {
+    let seed = seed(challenge, nonce);
+    let equix = equix::EquiXBuilder::new()
+        .runtime(equix::RuntimeOption::TryCompile)
+        .build(&seed)
+        .map_err(|_| DrillxError::BadEquix)?;
+    Ok(equix.solve_with_memory(memory))
 }
