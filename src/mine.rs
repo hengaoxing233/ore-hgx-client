@@ -87,6 +87,7 @@ pub async fn mine(args: MineArgs, url: String) {
     let mut min_difficulty = 0;
     let mut nonce_start = 0;
     let mut nonce_end = 0;
+    let mut cutoff_time = 0;
     loop {
         info!("----------------------获取任务-----------------------");
         let res = client.get(format!("{server_url}/getchallenge"))
@@ -105,6 +106,7 @@ pub async fn mine(args: MineArgs, url: String) {
                                 min_difficulty = json["min_difficulty"].as_u64().unwrap_or_default() as u32;
                                 nonce_start = json["nonce_start"].as_u64().unwrap_or_default();
                                 nonce_end = json["nonce_end"].as_u64().unwrap_or_default();
+                                cutoff_time = json["min_difficulty"].as_u64().unwrap_or_default();
                             } else {
                                 error!("获取任务失败");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -164,7 +166,7 @@ pub async fn mine(args: MineArgs, url: String) {
                 let mut nonce = start_nonce;
 
                 // 挖矿循环，直到达到nonce范围或超时
-                while nonce < end_nonce && hash_timer.elapsed().as_secs() < 10 {
+                while nonce < end_nonce && hash_timer.elapsed().as_secs() < cutoff_time {
                     // Create hash
                     for hx in  get_hashes_with_memory(&mut memory, &challenge, &nonce.to_le_bytes()) {
                         total_hashes += 1;
