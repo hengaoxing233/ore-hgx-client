@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use mine::MineArgs;
 
 mod mine;
+mod log;
 
 // --------------------------------
 
